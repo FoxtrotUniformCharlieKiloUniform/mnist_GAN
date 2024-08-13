@@ -1,3 +1,7 @@
+#most recent got stuck in training phase in the first bit. Might have to restructure the algorithm in a bit
+
+
+
 #imports
 import struct
 from array import array
@@ -18,7 +22,7 @@ torch.manual_seed(123)
 np.random.seed(123)
 
 #model parameters
-batch_size = 12 #60000 should be divisible by this number
+batch_size = 500 #60000 should be divisible by this number
 num_epochs = 450
 
 
@@ -94,7 +98,22 @@ dataLoaderTrain = MnistDataLoaderTrain(x_train_tensor, y_train_tensor)
 #TODO: consolidate train and test dataloaders into one? for both this and random numbers?
 mnistDataSetTrain = DataLoader(dataLoaderTrain, batch_size = batch_size, shuffle = False)
 
+def weights_init(m):
+    classname = m.__class__.__name__
+    if classname.find('Conv') != -1:
+        m.weight.data.normal_(0.0, 0.02)
+    elif classname.find('BatchNorm') != -1:
+        m.weight.data.normal_(1.0, 0.02)
+        m.bias.data.fill_(0)
 
+"""
+The default weight initialization provided by PyTorch easily leads to saturation, so we need a custom weight initializer. What is saturation? the state in which a neuron 
+predominantly outputs values close to the asymptotic ends of the bounded activation function. This is a kind of vanishing gradient problems, which is the gradient will be 
+vanishingly small, effectively preventing the weight from changing its value. In the worst case, this may completely stop the neural network from further training.
+#From the DCGAN paper, the authors specify that all model weights shall be randomly initialized from a Normal distribution with mean=0, stdev=0.02. 
+# The weights_init function takes an initialized model as input and reinitializes all convolutional, convolutional-transpose, and batch normalization layers to meet this 
+# criteria. This function is applied to the models immediately after initialization.
+"""
 
 
 # Helper function to show a list of images with their relating titles
@@ -140,6 +159,10 @@ img_size = x_train_tensor[0].size(0)
 print("Image size is", img_size)
 print("Entire tensor size is ",x_train_tensor.size())
 
+
+hidden_dim = 8
+latent_dim = 2
+
 class Generator(nn.Module):
     def __init__(self, input_length, batch_size):
         super(Generator, self).__init__()
@@ -149,25 +172,22 @@ class Generator(nn.Module):
         
         # Linear FC layer to create multiple representations of the same thing
         # Decoding layers (upsampling)
-        self.deconv1 = nn.ConvTranspose2d(in_channels = 1, out_channels = 64, kernel_size = 4, stride = 2, padding = 1)
-        self.deconv2 = nn.ConvTranspose2d(64, 32, kernel_size=4, stride=2, padding=1)
-        self.deconv3 = nn.ConvTranspose2d(32, 1, kernel_size=4, stride=4, padding=211, output_padding = 2)
+        self.deconv1 = nn.ConvTranspose2d(latent_dim, out_channels = hidden_dim * 8, kernel_size = 4, stride = 2, padding = 1)
+        self.deconv2 = nn.ConvTranspose2d(hidden_dim * 8, hidden_dim * 4, kernel_size=4, stride=2, padding=1)
+        self.deconv3 = nn.ConvTranspose2d(hidden_dim * 4, 1, kernel_size=4, stride=4, padding=211, output_padding = 2)
 
         # Batch normalization layers
-        self.bn4 = nn.BatchNorm2d(64)
-        self.bn5 = nn.BatchNorm2d(32)
+        self.bn4 = nn.BatchNorm2d(hidden_dim * 8)
+        self.bn5 = nn.BatchNorm2d(hidden_dim * 4)
 
     def forward(self, x):
         
+        x = x.view(batch_size, latent_dim, self.input_length, self.input_length)
         
-        x = x.view(batch_size, 1, self.input_length, self.input_length)
-        
-        #print(f"Intro x shape {x.shape}")
-
         x = F.relu(self.bn4(self.deconv1(x)))
         
         #print(f"level 2 x shape {x.shape}")
-        x = F.relu(self.bn5(self.deconv2(x)))
+        x = F.relu(self.bn5(self.deconv2(x) ))
 
         #print(f"level 3 x shape {x.shape}")
         # Final output layer with tanh activation
@@ -200,7 +220,7 @@ class Discriminator(nn.Module):
 
     def forward(self, x):
         # Reshape the input to match convolutional input size
-        x = x.view(-1, self.input_length, self.input_length)
+        x = x.view(batch_size, self.input_length, self.input_length)
 
         # Convolutional layers with ReLU activation
         x = F.leaky_relu(self.conv1(x))
@@ -222,16 +242,16 @@ class Discriminator(nn.Module):
         
 def Train(epochs, verbose, showImages):
     generator = Generator(img_size, batch_size).to(device)
+    generator.apply(weights_init)           #see weight initialization note above
     discriminator = Discriminator(img_size, batch_size).to(device)
-    generator_opt = torch.optim.Adam(generator.parameters(), lr=0.001)
-    discriminator_opt = torch.optim.Adam(discriminator.parameters(), lr=0.001)
+    discriminator.apply(weights_init)       #see weight initialization note above 
+
+    generator_opt = torch.optim.Adam(generator.parameters(), lr=0.0001, betas=(0.5, 0.999))
+    discriminator_opt = torch.optim.Adam(discriminator.parameters(), lr=0.0001, betas=(0.5, 0.999))
     loss = nn.BCELoss()
 
     for i in range(epochs):
-        
-        correct_predictions = 0
-        total_predictions = 0
-        
+
         generator_opt.zero_grad()
         noise = torch.from_numpy(np.random.rand(img_size, img_size)).to(device)
         for x_train_tensor, _ in mnistDataSetTrain:
@@ -246,7 +266,7 @@ def Train(epochs, verbose, showImages):
             loss_real.backward()
 
             # Train discriminator with fake images
-            noise = torch.randn(batch_size, img_size, img_size).cuda()
+            noise = torch.randn(batch_size, latent_dim, img_size, img_size).cuda()
             fake_images = generator(noise)
             label_fake = torch.zeros(batch_size, 1).cuda()
             output_fake = discriminator(fake_images.detach()).view(-1, 1)
@@ -263,7 +283,7 @@ def Train(epochs, verbose, showImages):
 
 
                 
-            if ((i + 1) % 100 == 0) & verbose == True:
+            if ((i + 1) % 100 == 0):
                 print(f'Epoch [{i+1}/{num_epochs}], Batch [{i+1}/{len(mnistDataSetTrain)}], '
                     f'D_real: {output_real.mean():.4f}, D_fake: {output_fake.mean():.4f}, '
                     f'Loss_D: {loss_real.item() + loss_fake.item():.4f}, Loss_G: {loss_g.item():.4f}')
